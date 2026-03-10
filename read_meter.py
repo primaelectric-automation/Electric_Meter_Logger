@@ -9,10 +9,9 @@ from pymodbus.constants import Endian
 # Configure logging
 logging.basicConfig()
 log = logging.getLogger()
-log.setLevel(logging.ERROR) # Set to ERROR to keep the console clean
+log.setLevel(logging.ERROR)
 
 def run_monitor(port_name):
-    # Initialize the Modbus RTU Client
     client = ModbusClient(
         port=port_name,
         baudrate=9600,
@@ -22,55 +21,46 @@ def run_monitor(port_name):
         timeout=1
     )
 
-    print(f"Connecting to {port_name}...")
     if not client.connect():
-        print(f"Failed to connect to {port_name}. Check your connections.")
+        print(f"Failed to connect to {port_name}.")
         return
 
     try:
-        print("Starting monitoring. Press Ctrl+C to stop.\n")
+        print(f"Monitoring {port_name}. Press Ctrl+C to stop.\n")
         while True:
-            # Reading 6 registers starting at 66
-            result = client.read_holding_registers(address=66, count=6, slave=1)
+            # --- BLOCK 1: Voltage (Registers 66, 68, 70) ---
+            res_v = client.read_holding_registers(address=66, count=6, slave=1)
+            
+            # --- BLOCK 2: Current (Registers 88, 90, 92) ---
+            res_i = client.read_holding_registers(address=88, count=6, slave=1)
 
-            if not result.isError():
-                decoder = BinaryPayloadDecoder.fromRegisters(
-                    result.registers, 
-                    byteorder=Endian.BIG, 
-                    wordorder=Endian.BIG
-                )
+            if not res_v.isError() and not res_i.isError():
+                # Decode Voltage
+                dec_v = BinaryPayloadDecoder.fromRegisters(res_v.registers, Endian.BIG, Endian.BIG)
+                v1, v2, v3 = [dec_v.decode_32bit_uint() / 10000 for _ in range(3)]
 
-                # Decode the values
-                val_P1 = decoder.decode_32bit_uint() / 10000
-                val_P2 = decoder.decode_32bit_uint() / 10000
-                val_P3 = decoder.decode_32bit_uint() / 10000
+                # Decode Current
+                dec_i = BinaryPayloadDecoder.fromRegisters(res_i.registers, Endian.BIG, Endian.BIG)
+                i1, i2, i3 = [dec_i.decode_32bit_uint() / 10000 for _ in range(3)]
                 
-                # Clear line and print (using \r to keep it on one line if preferred)
-                print(f"L1: {val_P1:>7.2f} V | L2: {val_P2:>7.2f} V | L3: {val_P3:>7.2f} V", end='\r')
-            else:
-                print(f"\nModbus Error: {result}")
+                # Combined Print Output
+                # \033[K clears the line to prevent ghost characters
+                output = (f"VOLTS: {v1:>6.1f}V {v2:>6.1f}V {v3:>6.1f}V | "
+                          f"AMPS: {i1:>6.2f}A {i2:>6.2f}A {i3:>6.2f}A")
+                print(f"\r\033[K{output}", end='', flush=True)
 
-            time.sleep(1) # Wait for 1 second
+            else:
+                print(f"\nRead Error - V: {res_v} | I: {res_i}")
+
+            time.sleep(1)
 
     except KeyboardInterrupt:
-        print("\nMonitoring stopped by user.")
-    except ModbusException as e:
-        print(f"\nCommunication Error: {e}")
+        print("\nStopped.")
     finally:
         client.close()
-        print("Connection closed.")
 
 if __name__ == "__main__":
-    # --- Parser Setup ---
-    parser = argparse.ArgumentParser(description="Modbus RTU Voltage Monitor")
-    parser.add_argument(
-        '--port', 
-        type=str, 
-        default='COM4', 
-        help='The serial port to use (e.g., COM4 or /dev/ttyUSB0)'
-    )
-    
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--port', type=str, default='COM4')
     args = parser.parse_args()
-    
-    # Run the function with the parsed port
     run_monitor(args.port)
