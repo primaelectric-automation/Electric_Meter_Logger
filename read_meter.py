@@ -1,66 +1,105 @@
 import logging
 import argparse
 import time
+import csv  # Added for CSV support
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
 from pymodbus.client import ModbusSerialClient as ModbusClient
-from pymodbus.exceptions import ModbusException
 from pymodbus.payload import BinaryPayloadDecoder
 from pymodbus.constants import Endian
 
-# Configure logging
 logging.basicConfig()
 log = logging.getLogger()
 log.setLevel(logging.ERROR)
 
-def run_monitor(port_name):
-    client = ModbusClient(
-        port=port_name,
-        baudrate=9600,
-        parity='N',
-        stopbits=1,
-        bytesize=8,
-        timeout=1
-    )
+class ModbusPlotter:
+    def __init__(self, port, filename="power_log.csv"):
+        self.client = ModbusClient(port=port, baudrate=9600, parity='N', stopbits=1, bytesize=8, timeout=1)
+        if not self.client.connect():
+            raise ConnectionError(f"Could not connect to {port}")
 
-    if not client.connect():
-        print(f"Failed to connect to {port_name}.")
-        return
+        # CSV Initialization
+        self.filename = filename
+        self.init_csv()
 
-    try:
-        print(f"Monitoring {port_name}. Press Ctrl+C to stop.\n")
-        while True:
-            # --- BLOCK 1: Voltage (Registers 66, 68, 70) ---
-            res_v = client.read_holding_registers(address=66, count=6, slave=1)
-            
-            # --- BLOCK 2: Current (Registers 88, 90, 92) ---
-            res_i = client.read_holding_registers(address=88, count=6, slave=1)
+        self.limit = 60 
+        self.xdata = []
+        self.ydata = {'v': [[],[],[]], 'i': [[],[],[]], 'p': [[],[],[]]}
+        
+        self.fig, (self.ax_v, self.ax_i, self.ax_p) = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+        self.lines_v = [self.ax_v.plot([], [], label=f'Ph{i+1}')[0] for i in range(3)]
+        self.lines_i = [self.ax_i.plot([], [], label=f'Ph{i+1}')[0] for i in range(3)]
+        self.lines_p = [self.ax_p.plot([], [], label=f'Ph{i+1}')[0] for i in range(3)]
 
-            if not res_v.isError() and not res_i.isError():
-                # Decode Voltage
-                dec_v = BinaryPayloadDecoder.fromRegisters(res_v.registers, Endian.BIG, Endian.BIG)
-                v1, v2, v3 = [dec_v.decode_32bit_uint() / 10000 for _ in range(3)]
+        for ax, lbl in zip([self.ax_v, self.ax_i, self.ax_p], ['Volts', 'Amps', 'kW']):
+            ax.set_ylabel(lbl)
+            ax.legend(loc='upper right', ncol=3)
 
-                # Decode Current
-                dec_i = BinaryPayloadDecoder.fromRegisters(res_i.registers, Endian.BIG, Endian.BIG)
-                i1, i2, i3 = [dec_i.decode_32bit_uint() / 10000 for _ in range(3)]
+    def init_csv(self):
+        """Creates the CSV and writes the header."""
+        with open(self.filename, mode='w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['Timestamp', 'V1', 'V2', 'V3', 'I1', 'I2', 'I3', 'P1', 'P2', 'P3'])
+
+    def log_to_csv(self, v, i, p):
+        """Appends a new row of data to the CSV."""
+        with open(self.filename, mode='a', newline='') as f:
+            writer = csv.writer(f)
+            # Combine timestamp with all phase values
+            writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S")] + v + i + p)
+
+    def update(self, frame):
+        rv = self.client.read_holding_registers(66, 6, slave=1)
+        ri = self.client.read_holding_registers(88, 6, slave=1)
+        rp = self.client.read_holding_registers(100, 6, slave=1)
+
+        if not any(r.isError() for r in [rv, ri, rp]):
+            dv = BinaryPayloadDecoder.fromRegisters(rv.registers, Endian.BIG, Endian.BIG)
+            di = BinaryPayloadDecoder.fromRegisters(ri.registers, Endian.BIG, Endian.BIG)
+            dp = BinaryPayloadDecoder.fromRegisters(rp.registers, Endian.BIG, Endian.BIG)
+
+            v = [dv.decode_32bit_uint() / 10000 for _ in range(3)]
+            i = [di.decode_32bit_uint() / 10000 for _ in range(3)]
+            p = [dp.decode_32bit_uint() / 10000 for _ in range(3)]
+
+            # Log to CSV
+            self.log_to_csv(v, i, p)
+
+            self.xdata.append(time.time())
+            if len(self.xdata) > self.limit: self.xdata.pop(0)
+
+            for j in range(3):
+                # Fixed a minor logic bug from original: 
+                # j loop should update specific phase lists correctly
+                self.ydata['v'][j].append(v[j])
+                self.ydata['i'][j].append(i[j])
+                self.ydata['p'][j].append(p[j])
                 
-                # Combined Print Output
-                # \033[K clears the line to prevent ghost characters
-                output = (f"VOLTS: {v1:>6.1f}V {v2:>6.1f}V {v3:>6.1f}V | "
-                          f"AMPS: {i1:>6.2f}A {i2:>6.2f}A {i3:>6.2f}A")
-                print(f"\r\033[K{output}", end='', flush=True)
+                if len(self.ydata['v'][j]) > self.limit: self.ydata['v'][j].pop(0)
+                if len(self.ydata['i'][j]) > self.limit: self.ydata['i'][j].pop(0)
+                if len(self.ydata['p'][j]) > self.limit: self.ydata['p'][j].pop(0)
 
-            else:
-                print(f"\nRead Error - V: {res_v} | I: {res_i}")
+            for idx in range(3):
+                self.lines_v[idx].set_data(range(len(self.xdata)), self.ydata['v'][idx])
+                self.lines_i[idx].set_data(range(len(self.xdata)), self.ydata['i'][idx])
+                self.lines_p[idx].set_data(range(len(self.xdata)), self.ydata['p'][idx])
 
-            time.sleep(1)
-
-    except KeyboardInterrupt:
-        print("\nStopped.")
-    finally:
-        client.close()
+            for ax in [self.ax_v, self.ax_i, self.ax_p]:
+                ax.relim()
+                ax.autoscale_view()
+            
+            print(f"\rV: {v[0]:.1f} {v[1]:.1f} {v[2]:.1f} | I: {i[0]:.2f} {i[1]:.2f} {i[2]:.2f}", end="")
+            
+        return self.lines_v + self.lines_i + self.lines_p
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--port', type=str, default='COM4')
+    parser.add_argument('--port', default='COM4')
+    parser.add_argument('--output', default='power_log.csv', help='CSV filename')
     args = parser.parse_args()
-    run_monitor(args.port)
+
+    monitor = ModbusPlotter(args.port, args.output)
+    ani = FuncAnimation(monitor.fig, monitor.update, interval=1000, cache_frame_data=False)
+    plt.tight_layout()
+    plt.show()
+    monitor.client.close()
