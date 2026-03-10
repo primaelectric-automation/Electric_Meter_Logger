@@ -13,6 +13,12 @@ python -m pip install -r requirements.txt
 python read_meter.py
 ```
 
+## Settingan Modbus Poll
+
+![Setingan Serial Console](images/serial_connection.png)
+
+![Setingan Alamat Modbus](images/Modbus_Address.png)
+
 ## Masalah dengan Driver
 
 Jika anda mengalami masalah dengan Driver dengan Warning seperti berikut (windows 11):
